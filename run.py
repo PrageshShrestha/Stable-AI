@@ -41,21 +41,21 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--texture-resolution",
-        default=1024,
+        default=2048,
         type=int,
-        help="Texture atlas resolution. Default: 1024",
+        help="Texture atlas resolution. Default: 2048",
     )
     parser.add_argument(
         "--remesh_option",
         choices=["none", "triangle", "quad"],
-        default="none",
+        default="triangle",
         help="Remeshing option",
     )
     parser.add_argument(
         "--target_vertex_count",
         type=int,
         help="Target vertex count. -1 does not perform a reduction.",
-        default=-1,
+        default=50000,
     )
     parser.add_argument(
         "--batch_size", default=1, type=int, help="Batch size for inference"

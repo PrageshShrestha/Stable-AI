@@ -88,6 +88,24 @@ def get_extensions():
         extra_compile_args.update({"cxx": ["-O3", "-arch", "arm64", "-mmacosx-version-min=10.15"]})
         extra_link_args += ["-arch", "arm64"]
 
+    # Handle GPU architecture properly for modern CUDA versions
+    if use_cuda and not is_hip_extension:
+        # Get CUDA architecture from environment or detect
+        cuda_arch_list = os.getenv("TORCH_CUDA_ARCH_LIST", "")
+        if cuda_arch_list:
+            # Use provided architectures
+            arch_list = cuda_arch_list.split(";")
+            extra_compile_args["nvcc"].extend([f"-gencode=arch=compute_{arch.split('=')[0]},code=sm_{arch.split('=')[0]}" for arch in arch_list if arch.strip()])
+        else:
+            # Default to modern architectures that work with CUDA 12.x
+            # Avoid compute_120 as it's not supported in CUDA 12.8
+            extra_compile_args["nvcc"].extend([
+                "-gencode=arch=compute_80,code=sm_80",
+                "-gencode=arch=compute_86,code=sm_86", 
+                "-gencode=arch=compute_89,code=sm_89",
+                "-gencode=arch=compute_90,code=sm_90",
+            ])
+
     extensions.append(
         extension(
             name=f"{library_name}._C",

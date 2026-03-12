@@ -296,7 +296,7 @@ with gr.Blocks() as demo:
         with gr.Column():
             output_3d = LitModel3D(
                 label="3D Model",
-                visible=False,
+                visible=True,
                 clear_color=[0.0, 0.0, 0.0, 0.0],
                 tonemapping="aces",
                 contrast=1.0,
