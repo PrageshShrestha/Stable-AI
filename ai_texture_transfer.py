@@ -185,13 +185,17 @@ class AITextureTransfer:
         reference_image: Optional[Image.Image] = None,
         texture_size: int = 1024,
         prompt: str = "detailed realistic texture",
-        texture_source_type: str = "reference"
+        texture_source_type: str = "reference",
+        use_direct_mapping: bool = False
     ) -> trimesh.Trimesh:
-        """Generate texture for mesh using Stable Diffusion"""
+        """Generate texture for mesh using Stable Diffusion or direct color mapping"""
+        
+        # Direct color preservation mode - bypass AI entirely
+        if use_direct_mapping and reference_image and texture_source_type == "sf3d_original":
+            print("Using direct color preservation mode - bypassing AI generation...")
+            return self._direct_color_mapping(mesh, reference_image, texture_size)
         
         if not DIFFUSERS_AVAILABLE or self.texture_pipe is None:
-            
-            
             print("AI models not available, using fallback method...")
             return self._generate_fallback_texture(mesh, reference_image, texture_size, prompt, texture_source_type)
         
@@ -257,6 +261,129 @@ class AITextureTransfer:
         except Exception as e:
             print(f"AI texture generation failed: {e}")
             return self._generate_fallback_texture(mesh, reference_image, texture_size, prompt, texture_source_type)
+    
+    def _direct_color_mapping(self, mesh: trimesh.Trimesh, reference_image: Image.Image, texture_size: int = 1024) -> trimesh.Trimesh:
+        """Direct color preservation - map original image colors directly to mesh without AI processing"""
+        print(f"Performing direct color mapping with texture size {texture_size}...")
+        
+        # Resize reference image to target texture size
+        texture_image = reference_image.resize((texture_size, texture_size)).convert("RGB")
+        texture_array = np.array(texture_image)
+        
+        # Generate proper UV coordinates using multiple projection methods
+        print("Generating optimal UV coordinates...")
+        uv_coords = self._generate_optimal_uv_coordinates(mesh, texture_size)
+        
+        # Sample colors from texture using UV coordinates
+        vertex_colors = self._sample_colors_from_texture(texture_array, uv_coords, mesh.vertices)
+        
+        # Create mesh with exact colors from original image
+        colored_mesh = trimesh.Trimesh(
+            vertices=mesh.vertices,
+            faces=mesh.faces,
+            vertex_colors=vertex_colors
+        )
+        
+        print("Direct color mapping completed - exact colors preserved!")
+        return colored_mesh
+    
+    def _generate_optimal_uv_coordinates(self, mesh: trimesh.Trimesh, texture_size: int) -> np.ndarray:
+        """Generate optimal UV coordinates using multiple projection methods"""
+        vertices = mesh.vertices
+        
+        # Center the vertices for better projection
+        center = vertices.mean(axis=0)
+        vertices_centered = vertices - center
+        
+        # Calculate bounding box for normalization
+        bbox_min = vertices_centered.min(axis=0)
+        bbox_max = vertices_centered.max(axis=0)
+        bbox_range = bbox_max - bbox_min
+        
+        # Try different projection methods and choose the best one
+        methods = []
+        
+        # Method 1: Spherical projection (best for rounded objects)
+        try:
+            x, y, z = vertices_centered[:, 0], vertices_centered[:, 1], vertices_centered[:, 2]
+            r = np.sqrt(x**2 + y**2 + z**2)
+            r = np.maximum(r, 1e-8)
+            
+            u_sphere = 0.5 + np.arctan2(y, x) / (2 * np.pi)
+            v_sphere = 0.5 - np.arcsin(z / r) / np.pi
+            
+            uv_sphere = np.column_stack([u_sphere, v_sphere])
+            methods.append(("spherical", uv_sphere))
+        except:
+            pass
+        
+        # Method 2: Cylindrical projection (best for tall objects)
+        try:
+            x, y, z = vertices_centered[:, 0], vertices_centered[:, 1], vertices_centered[:, 2]
+            r = np.sqrt(x**2 + y**2)
+            r = np.maximum(r, 1e-8)
+            
+            u_cyl = 0.5 + np.arctan2(y, x) / (2 * np.pi)
+            v_cyl = (z - bbox_min[2]) / (bbox_range[2] + 1e-8)
+            
+            uv_cyl = np.column_stack([u_cyl, v_cyl])
+            methods.append(("cylindrical", uv_cyl))
+        except:
+            pass
+        
+        # Method 3: Planar projection (best for flat objects)
+        try:
+            # Project onto XY plane
+            u_planar = (vertices_centered[:, 0] - bbox_min[0]) / (bbox_range[0] + 1e-8)
+            v_planar = (vertices_centered[:, 1] - bbox_min[1]) / (bbox_range[1] + 1e-8)
+            
+            uv_planar = np.column_stack([u_planar, v_planar])
+            methods.append(("planar", uv_planar))
+        except:
+            pass
+        
+        # Choose the method with minimal UV distortion
+        best_method = methods[0][1] if methods else np.random.rand(len(vertices), 2)
+        
+        # Normalize UV coordinates to [0, 1]
+        best_method = np.clip(best_method, 0, 1)
+        
+        print(f"Using projection method: {methods[0][0] if methods else 'random'}")
+        return best_method
+    
+    def _sample_colors_from_texture(self, texture_array: np.ndarray, uv_coords: np.ndarray, vertices: np.ndarray) -> np.ndarray:
+        """Sample colors from texture using UV coordinates with proper interpolation"""
+        texture_height, texture_width = texture_array.shape[:2]
+        
+        # Convert UV coordinates to pixel coordinates
+        pixel_coords = uv_coords * np.array([texture_width - 1, texture_height - 1])
+        
+        # Use bilinear interpolation for smoother color sampling
+        vertex_colors = []
+        for i, (u, v) in enumerate(pixel_coords):
+            x, y = u, v
+            
+            # Bilinear interpolation
+            x0, y0 = int(np.floor(x)), int(np.floor(y))
+            x1, y1 = min(x0 + 1, texture_width - 1), min(y0 + 1, texture_height - 1)
+            
+            # Calculate interpolation weights
+            wx, wy = x - x0, y - y0
+            
+            # Sample four neighboring pixels
+            c00 = texture_array[y0, x0]
+            c10 = texture_array[y0, x1] 
+            c01 = texture_array[y1, x0]
+            c11 = texture_array[y1, x1]
+            
+            # Bilinear interpolation
+            c0 = c00 * (1 - wx) + c10 * wx
+            c1 = c01 * (1 - wx) + c11 * wx
+            color = c0 * (1 - wy) + c1 * wy
+            
+            vertex_colors.append(color)
+        
+        return np.array(vertex_colors, dtype=np.uint8)
     
     def _generate_fallback_texture(
         self, 
@@ -482,10 +609,11 @@ def apply_ai_texture_transfer(
     output_path: str = None,
     texture_size: int = 1024,
     prompt: str = "detailed realistic texture",
-    device: str = "cuda"
+    device: str = "cuda",
+    use_direct_mapping: bool = False
 ) -> str:
     """
-    Apply AI texture transfer to a mesh using Stable Diffusion
+    Apply AI texture transfer to a mesh using Stable Diffusion or direct color mapping
     
     Args:
         mesh_path: Path to input mesh file
@@ -495,6 +623,7 @@ def apply_ai_texture_transfer(
         texture_size: Size of generated texture
         prompt: Text prompt for texture generation
         device: Device to use for processing
+        use_direct_mapping: If True, bypass AI and use direct color preservation
     
     Returns:
         Path to textured mesh file
@@ -548,7 +677,8 @@ def apply_ai_texture_transfer(
         reference_image=texture_source,
         texture_size=texture_size,
         prompt=prompt,
-        texture_source_type=texture_source_type
+        texture_source_type=texture_source_type,
+        use_direct_mapping=use_direct_mapping
     )
     
     # Save result

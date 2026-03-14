@@ -72,6 +72,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable AI texture transfer using reference image"
     )
+    parser.add_argument(
+        "--direct-color-mode",
+        action="store_true",
+        help="Use direct color preservation mode (bypasses AI for exact color matching)"
+    )
     default_prompt="High-fidelity texture with exact color mapping, seamless UV, clean albedo, photorealistic 8k quality"
     parser.add_argument(
         "--texture-prompt",
@@ -168,7 +173,8 @@ if __name__ == "__main__":
                         output_path=os.path.join(output_dir, str(i), "mesh_ai_textured.glb"),
                         texture_size=args.texture_resolution,
                         prompt=args.texture_prompt,
-                        device=device
+                        device=device,
+                        use_direct_mapping=args.direct_color_mode  # Add direct mapping option
                     )
                     print(f"AI textured mesh saved to: {textured_mesh_path}")
                 except Exception as e:
@@ -192,7 +198,8 @@ if __name__ == "__main__":
                             output_path=os.path.join(output_dir, str(i + j), "mesh_ai_textured.glb"),
                             texture_size=args.texture_resolution,
                             prompt=args.texture_prompt,
-                            device=device
+                            device=device,
+                            use_direct_mapping=args.direct_color_mode  # Add direct mapping option
                         )
                         print(f"AI textured mesh saved to: {textured_mesh_path}")
                     except Exception as e:
