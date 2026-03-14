@@ -72,10 +72,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable AI texture transfer using reference image"
     )
-    default_prompt="""
-Execute a high-fidelity 3D texture projection by mapping the exact color values and material patterns from the provided reference image onto the geometry of the grey mesh. Perform a precise 1:1 spatial alignment where every visual element from the photo is projected onto its corresponding part of the 3D model with absolute accuracy. Generate a complete set of PBR maps including Albedo, Roughness, and Metallic textures based on the surface qualities visible in the reference. Ensure the UV mapping is seamless with no stretching, ghosting, or mirroring artifacts on the sides or rear of the mesh. The final texture must be a clean, de-lighted Albedo map that captures the fine surface details, grain, and color variations of the original object without baking in the environmental shadows or highlights from the reference photo. Maintain high-resolution edge crispness where different colored parts of the object meet to ensure a professional, production-quality finish.
-
-"""
+    default_prompt="High-fidelity texture with exact color mapping, seamless UV, clean albedo, photorealistic 8k quality"
     parser.add_argument(
         "--texture-prompt",
         type=str,

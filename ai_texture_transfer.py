@@ -40,35 +40,93 @@ class AITextureTransfer:
             
         print("Loading depth estimation model...")
         try:
+            # Modern MiDaS/DPT weights from the standard annotators repo
             self.depth_estimator = MidasDetector.from_pretrained(
-                "valhalla/t2iadapter-aux-midas"
+                "lllyasviel/Annotators"
             ).to(self.device)
+            print("Depth estimation model loaded successfully")
         except Exception as e:
             print(f"Failed to load depth estimator: {e}")
-            return
+            self.depth_estimator = None  # Allow fallback even if estimator fails
+            # Do NOT return here - try to load pipeline anyway if possible
         
         print("Loading Stable Diffusion texture generation model...")
         try:
-            controlnet = ControlNetModel.from_pretrained(
-                "valhalla/t2iadapter-midas-sd21-fp16",
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
-            ).to(self.device)
+            # Check if model files exist locally first
+            model_path = "runwayml/stable-diffusion-inpainting"
+            controlnet_path = "lllyasviel/control_v11f1p_sd15_depth"
             
-            self.texture_pipe = StableDiffusionInpaintPipeline.from_pretrained(
-                "stabilityai/stable-diffusion-2-inpainting",
-                controlnet=controlnet,
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                safety_checker=None,
-                requires_safety_checker=False
-            ).to(self.device)
-            
-            if self.device == "cuda":
-                self.texture_pipe.enable_model_cpu_offload()
-                self.texture_pipe.enable_xformers_memory_efficient_attention()
+            # Load ControlNet separately first
+            try:
+                print(f"Loading ControlNet from {controlnet_path}...")
+                controlnet = ControlNetModel.from_pretrained(
+                    controlnet_path,
+                    torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                    local_files_only=False,
+                    resume_download=True
+                )
+                print("ControlNet loaded successfully")
+            except Exception as controlnet_error:
+                print(f"Failed to load ControlNet: {controlnet_error}")
+                print("Attempting to continue without ControlNet...")
+                controlnet = None
+
+            # Load pipeline with or without ControlNet
+            try:
+                print(f"Loading Stable Diffusion pipeline from {model_path}...")
+                pipeline_kwargs = {
+                    "torch_dtype": torch.float16 if self.device == "cuda" else torch.float32,
+                    "safety_checker": None,
+                    "requires_safety_checker": False,
+                    "local_files_only": False,
+                    "resume_download": True
+                }
+                
+                # Add variant for CUDA to reduce memory usage
+                if self.device == "cuda":
+                    pipeline_kwargs["variant"] = "fp16"
+                
+                # Only add controlnet if it loaded successfully
+                if controlnet is not None:
+                    pipeline_kwargs["controlnet"] = controlnet
+                    controlnet.to(self.device)
+                
+                self.texture_pipe = StableDiffusionInpaintPipeline.from_pretrained(
+                    model_path,
+                    **pipeline_kwargs
+                )
+                
+                # Move to device
+                self.texture_pipe.to(self.device)
+                
+                if self.device == "cuda":
+                    self.texture_pipe.enable_model_cpu_offload()  # Good for VRAM
+                    # Optional: if you have xformers installed
+                    # try:
+                    #     self.texture_pipe.enable_xformers_memory_efficient_attention()
+                    #     print("Enabled xformers memory efficient attention")
+                    # except:
+                    #     print("xformers not available, using default attention")
+                
+                print("Stable Diffusion pipeline loaded successfully")
+                
+            except Exception as pipeline_error:
+                print(f"Failed to load pipeline: {pipeline_error}")
+                print("This might be due to missing model files or network issues")
+                self.texture_pipe = None
                 
         except Exception as e:
-            print(f"Failed to load texture pipeline: {e}")
+            print(f"Unexpected error during model loading: {e}")
             self.texture_pipe = None
+        
+        # Add warning check for partial failures
+        if self.texture_pipe is None:
+            print("Warning: Stable Diffusion pipeline failed to load - AI texture generation will be disabled")
+            print("Falling back to traditional texture methods only")
+        elif self.depth_estimator is None:
+            print("Warning: Depth estimator failed to load - texture quality may be reduced")
+        else:
+            print("All AI models loaded successfully")
     
     def generate_depth_map(self, mesh: trimesh.Trimesh, size: int = 512) -> np.ndarray:
         """Generate depth map from 3D mesh"""
@@ -133,7 +191,7 @@ class AITextureTransfer:
         
         if not DIFFUSERS_AVAILABLE or self.texture_pipe is None:
             
-            print(DIFFUSERS_AVAILABLE , self.texture_pipe)
+            
             print("AI models not available, using fallback method...")
             return self._generate_fallback_texture(mesh, reference_image, texture_size, prompt, texture_source_type)
         
@@ -162,6 +220,10 @@ class AITextureTransfer:
         
         # Create control image from depth
         try:
+            if self.depth_estimator is None:
+                print("Depth estimator not available, using fallback...")
+                return self._generate_fallback_texture(mesh, reference_image, texture_size, prompt, texture_source_type)
+            
             control_image = self.depth_estimator(depth_image, detect_resolution=512, image_resolution=512)
         except Exception as e:
             print(f"Depth estimation failed: {e}")
@@ -175,6 +237,7 @@ class AITextureTransfer:
             with torch.autocast("cuda" if self.device == "cuda" else "cpu"):
                 result = self.texture_pipe(
                     prompt=enhanced_prompt,
+                    negative_prompt="blurry, low quality, artifacts",
                     image=init_image,
                     mask_image=mask,
                     control_image=control_image,
@@ -293,28 +356,92 @@ class AITextureTransfer:
     def _apply_texture_to_mesh(self, mesh: trimesh.Trimesh, texture_image: Image.Image, texture_size: int = 1024) -> trimesh.Trimesh:
         """Apply texture to mesh"""
         try:
-            # Try to generate UV coordinates
-            mesh = mesh.unwrap_uv()
+            # Try to generate UV coordinates using trimesh's built-in functionality
+            print("Attempting to generate UV coordinates...")
             
-            # Create material with texture
-            material = trimesh.visual.texture.SimpleMaterial(image=texture_image)
+            # Create a copy of the mesh to avoid modifying the original
+            mesh_copy = mesh.copy()
             
-            # Apply texture to mesh
-            textured_mesh = trimesh.Trimesh(
-                vertices=mesh.vertices,
-                faces=mesh.faces,
-                visual=trimesh.visual.texture.TextureVisuals(
-                    uv=mesh.visual.uv,
-                    image=texture_image,
-                    material=material
-                )
-            )
-            
-            return textured_mesh
+            # Try to generate UV coordinates using trimesh's unwrapping
+            try:
+                # Use trimesh's unwrapping functionality
+                uv_visual = mesh_copy.uv_visual
+                if uv_visual is not None and hasattr(uv_visual, 'uv'):
+                    # UV coordinates already exist
+                    print("Found existing UV coordinates")
+                    return self._apply_proper_texture(mesh_copy, texture_image, texture_size)
+                else:
+                    # Try to generate new UV coordinates
+                    print("Generating new UV coordinates...")
+                    # Use a simple projection method as fallback
+                    return self._apply_projection_texture(mesh_copy, texture_image, texture_size)
+            except Exception as uv_error:
+                print(f"UV generation failed: {uv_error}")
+                return self._apply_vertex_colors(mesh, texture_image)
             
         except Exception as e:
-            print(f"UV mapping failed: {e}")
+            print(f"Texture application failed: {e}")
             # Fallback to vertex coloring
+            return self._apply_vertex_colors(mesh, texture_image)
+    
+    def _apply_projection_texture(self, mesh: trimesh.Trimesh, texture_image: Image.Image, texture_size: int = 1024) -> trimesh.Trimesh:
+        """Apply texture using simple projection mapping"""
+        try:
+            # Create UV coordinates using spherical projection
+            vertices = mesh.vertices
+            
+            # Center the vertices
+            center = vertices.mean(axis=0)
+            vertices_centered = vertices - center
+            
+            # Calculate spherical coordinates
+            x, y, z = vertices_centered[:, 0], vertices_centered[:, 1], vertices_centered[:, 2]
+            r = np.sqrt(x**2 + y**2 + z**2)
+            
+            # Avoid division by zero
+            r = np.maximum(r, 1e-8)
+            
+            # Spherical to UV mapping
+            u = 0.5 + np.arctan2(y, x) / (2 * np.pi)
+            v = 0.5 - np.arcsin(z / r) / np.pi
+            
+            # Normalize UV coordinates to [0, 1]
+            u = np.clip(u, 0, 1)
+            v = np.clip(v, 0, 1)
+            
+            uv_coordinates = np.column_stack([u, v])
+            
+            # Create texture coordinates
+            texture_coords = uv_coordinates * (texture_size - 1)
+            texture_coords = texture_coords.astype(int)
+            texture_coords = np.clip(texture_coords, 0, texture_size - 1)
+            
+            # Sample colors from texture
+            texture_array = np.array(texture_image)
+            vertex_colors = texture_array[texture_coords[:, 1], texture_coords[:, 0], :3]
+            
+            # Create mesh with vertex colors
+            colored_mesh = trimesh.Trimesh(
+                vertices=mesh.vertices,
+                faces=mesh.faces,
+                vertex_colors=vertex_colors
+            )
+            
+            print("Applied texture using spherical projection")
+            return colored_mesh
+            
+        except Exception as e:
+            print(f"Projection texture failed: {e}")
+            return self._apply_vertex_colors(mesh, texture_image)
+    
+    def _apply_proper_texture(self, mesh: trimesh.Trimesh, texture_image: Image.Image, texture_size: int = 1024) -> trimesh.Trimesh:
+        """Apply texture using proper UV mapping"""
+        try:
+            # This would be ideal but requires proper UV unwrapping
+            # For now, fall back to projection method
+            return self._apply_projection_texture(mesh, texture_image, texture_size)
+        except Exception as e:
+            print(f"Proper texture application failed: {e}")
             return self._apply_vertex_colors(mesh, texture_image)
     
     def _apply_vertex_colors(self, mesh: trimesh.Trimesh, texture_image: Image.Image) -> trimesh.Trimesh:
