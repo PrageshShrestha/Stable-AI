@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 from sf3d.system import SF3D
 from sf3d.utils import get_device, remove_background, resize_foreground
+from ai_texture_transfer import apply_ai_texture_transfer
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -59,6 +60,27 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--batch_size", default=1, type=int, help="Batch size for inference"
+    )
+    parser.add_argument(
+        "--reference-image", 
+        type=str, 
+        default=None, 
+        help="Path to reference image for texture transfer"
+    )
+    parser.add_argument(
+        "--enable-texture-transfer",
+        action="store_true",
+        help="Enable AI texture transfer using reference image"
+    )
+    default_prompt="""
+Execute a high-fidelity 3D texture projection by mapping the exact color values and material patterns from the provided reference image onto the geometry of the grey mesh. Perform a precise 1:1 spatial alignment where every visual element from the photo is projected onto its corresponding part of the 3D model with absolute accuracy. Generate a complete set of PBR maps including Albedo, Roughness, and Metallic textures based on the surface qualities visible in the reference. Ensure the UV mapping is seamless with no stretching, ghosting, or mirroring artifacts on the sides or rear of the mesh. The final texture must be a clean, de-lighted Albedo map that captures the fine surface details, grain, and color variations of the original object without baking in the environmental shadows or highlights from the reference photo. Maintain high-resolution edge crispness where different colored parts of the object meet to ensure a professional, production-quality finish.
+
+"""
+    parser.add_argument(
+        "--texture-prompt",
+        type=str,
+        default=default_prompt,
+        help="Text prompt for texture generation"
     )
     args = parser.parse_args()
 
@@ -135,7 +157,47 @@ if __name__ == "__main__":
         if len(image) == 1:
             out_mesh_path = os.path.join(output_dir, str(i), "mesh.glb")
             mesh.export(out_mesh_path, include_normals=True)
+            
+            # Apply AI texture transfer if enabled
+            if args.enable_texture_transfer:
+                print("Applying AI texture transfer...")
+                try:
+                    # Pass SF3D's background-removed image for exact color matching
+                    sf3d_image_path = os.path.join(output_dir, str(i), "input.png")
+                    textured_mesh_path = apply_ai_texture_transfer(
+                        mesh_path=out_mesh_path,
+                        reference_image_path=args.reference_image,
+                        sf3d_image_path=sf3d_image_path,  # Use SF3D image as primary texture source
+                        output_path=os.path.join(output_dir, str(i), "mesh_ai_textured.glb"),
+                        texture_size=args.texture_resolution,
+                        prompt=args.texture_prompt,
+                        device=device
+                    )
+                    print(f"AI textured mesh saved to: {textured_mesh_path}")
+                except Exception as e:
+                    print(f"AI texture transfer failed: {e}")
+                    print("Continuing with original mesh...")
         else:
             for j in range(len(mesh)):
                 out_mesh_path = os.path.join(output_dir, str(i + j), "mesh.glb")
                 mesh[j].export(out_mesh_path, include_normals=True)
+                
+                # Apply AI texture transfer if enabled
+                if args.enable_texture_transfer:
+                    print(f"Applying AI texture transfer to mesh {j}...")
+                    try:
+                        # Pass SF3D's background-removed image for exact color matching
+                        sf3d_image_path = os.path.join(output_dir, str(i + j), "input.png")
+                        textured_mesh_path = apply_ai_texture_transfer(
+                            mesh_path=out_mesh_path,
+                            reference_image_path=args.reference_image,
+                            sf3d_image_path=sf3d_image_path,  # Use SF3D image as primary texture source
+                            output_path=os.path.join(output_dir, str(i + j), "mesh_ai_textured.glb"),
+                            texture_size=args.texture_resolution,
+                            prompt=args.texture_prompt,
+                            device=device
+                        )
+                        print(f"AI textured mesh saved to: {textured_mesh_path}")
+                    except Exception as e:
+                        print(f"AI texture transfer failed: {e}")
+                        print("Continuing with original mesh...")

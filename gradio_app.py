@@ -14,6 +14,7 @@ from PIL import Image
 
 import sf3d.utils as sf3d_utils
 from sf3d.system import SF3D
+from ai_texture_transfer import apply_ai_texture_transfer
 
 os.environ["GRADIO_TEMP_DIR"] = os.path.join(os.environ.get("TMPDIR", "/tmp"), "gradio")
 
@@ -79,6 +80,26 @@ def run_model(input_image, remesh_option, vertex_count, texture_size):
     return tmp_file.name
 
 
+def apply_texture_to_mesh(mesh_path, reference_image, texture_prompt, enable_texture_transfer):
+    if not enable_texture_transfer or reference_image is None:
+        return mesh_path
+    
+    try:
+        print("Applying AI texture transfer...")
+        textured_mesh_path = apply_ai_texture_transfer(
+            mesh_path=mesh_path,
+            reference_image_path=reference_image.name if hasattr(reference_image, 'name') else reference_image,
+            output_path=mesh_path.replace('.glb', '_ai_textured.glb'),
+            texture_size=1024,
+            prompt=texture_prompt,
+            device=device
+        )
+        return textured_mesh_path
+    except Exception as e:
+        print(f"AI texture transfer failed: {e}")
+        return mesh_path
+
+
 def create_batch(input_image: Image) -> dict[str, Any]:
     img_cond = (
         torch.from_numpy(
@@ -139,6 +160,9 @@ def run_button(
     remesh_option,
     vertex_count,
     texture_size,
+    reference_image,
+    texture_prompt,
+    enable_texture_transfer,
 ):
     if run_btn == "Run":
         if torch.cuda.is_available():
@@ -146,6 +170,12 @@ def run_button(
         glb_file: str = run_model(
             background_state, remesh_option.lower(), vertex_count, texture_size
         )
+        
+        # Apply texture transfer if enabled
+        final_glb_file = apply_texture_to_mesh(
+            glb_file, reference_image, texture_prompt, enable_texture_transfer
+        )
+        
         if torch.cuda.is_available():
             print("Peak Memory:", torch.cuda.max_memory_allocated() / 1024 / 1024, "MB")
         elif torch.backends.mps.is_available():
@@ -158,7 +188,7 @@ def run_button(
             gr.update(),
             gr.update(),
             gr.update(),
-            gr.update(value=glb_file, visible=True),
+            gr.update(value=final_glb_file, visible=True),
             gr.update(visible=True),
         )
     elif run_btn == "Remove Background":
@@ -291,6 +321,29 @@ with gr.Blocks() as demo:
                 visible=True,
             )
 
+            # Texture transfer controls
+            with gr.Row():
+                enable_texture_transfer = gr.Checkbox(
+                    label="Enable AI Texture Transfer",
+                    value=False,
+                    info="Add realistic textures using AI and reference image"
+                )
+            
+            reference_image = gr.Image(
+                type="pil",
+                label="Reference Image for Texture",
+                sources=["upload"],
+                visible=True,
+                info="Upload an image to guide texture generation"
+            )
+            
+            texture_prompt = gr.Textbox(
+                label="Texture Description",
+                value="detailed realistic texture",
+                visible=True,
+                info="Describe the desired texture appearance"
+            )
+
             run_btn = gr.Button("Run", variant="primary", visible=False)
 
         with gr.Column():
@@ -355,6 +408,9 @@ with gr.Blocks() as demo:
             remesh_option,
             vertex_count_slider,
             texture_size,
+            reference_image,
+            texture_prompt,
+            enable_texture_transfer,
         ],
         outputs=[
             run_btn,
