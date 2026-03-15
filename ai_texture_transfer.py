@@ -263,31 +263,253 @@ class AITextureTransfer:
             return self._generate_fallback_texture(mesh, reference_image, texture_size, prompt, texture_source_type)
     
     def _direct_color_mapping(self, mesh: trimesh.Trimesh, reference_image: Image.Image, texture_size: int = 1024) -> trimesh.Trimesh:
-        """Direct color preservation - map original image colors directly to mesh without AI processing"""
-        print(f"Performing direct color mapping with texture size {texture_size}...")
+        """Direct color preservation using perspective-aware ray casting for accurate color mapping"""
+        print(f"Performing perspective-aware color mapping with texture size {texture_size}...")
         
         # Resize reference image to target texture size
         texture_image = reference_image.resize((texture_size, texture_size)).convert("RGB")
         texture_array = np.array(texture_image)
         
-        # Generate proper UV coordinates using multiple projection methods
-        print("Generating optimal UV coordinates...")
-        uv_coords = self._generate_optimal_uv_coordinates(mesh, texture_size)
+        # Generate camera-aware color mapping using ray casting
+        print("Performing perspective-aware ray casting...")
+        vertex_colors = self._perspective_aware_color_mapping(mesh, texture_array)
         
-        # Sample colors from texture using UV coordinates
-        vertex_colors = self._sample_colors_from_texture(texture_array, uv_coords, mesh.vertices)
-        
-        # Create mesh with exact colors from original image
+        # Create mesh with accurate colors from original image perspective
         colored_mesh = trimesh.Trimesh(
             vertices=mesh.vertices,
             faces=mesh.faces,
             vertex_colors=vertex_colors
         )
         
-        print("Direct color mapping completed - exact colors preserved!")
+        print("Perspective-aware color mapping completed - accurate colors preserved!")
         return colored_mesh
     
-    def _generate_optimal_uv_coordinates(self, mesh: trimesh.Trimesh, texture_size: int) -> np.ndarray:
+    def _perspective_aware_color_mapping(self, mesh: trimesh.Trimesh, texture_array: np.ndarray) -> np.ndarray:
+        """Map colors using ray casting from camera perspective to match original photo viewpoint"""
+        vertices = mesh.vertices
+        texture_height, texture_width = texture_array.shape[:2]
+        
+        # Estimate camera parameters from mesh geometry
+        camera_params = self._estimate_camera_parameters(mesh)
+        camera_position = camera_params['position']
+        fov = camera_params['fov']
+        
+        # Create perspective projection matrix
+        projection_matrix = self._create_perspective_projection_matrix(fov, texture_width, texture_height)
+        
+        # Create Z-buffer for depth-aware sampling and occlusion handling
+        vertex_depths = self._create_depth_buffer(mesh, camera_position)
+        
+        vertex_colors = []
+        
+        for i, vertex in enumerate(vertices):
+            # Project 3D vertex to 2D screen coordinates using perspective projection
+            screen_coords = self._project_vertex_to_screen(vertex, camera_position, projection_matrix, texture_width, texture_height)
+            
+            if screen_coords is None:
+                # Vertex is behind camera or invalid
+                color = np.array([128, 128, 128], dtype=np.uint8)  # Default gray
+            else:
+                screen_x, screen_y, depth = screen_coords
+                
+                # Check occlusion using Z-buffer
+                if self._is_vertex_occluded(i, depth, vertex_depths):
+                    # Vertex is hidden behind other vertices
+                    color = np.array([64, 64, 64], dtype=np.uint8)  # Darker for occluded
+                else:
+                    # Sample color from texture with bounds checking and sub-pixel accuracy
+                    color = self._sample_color_with_interpolation(texture_array, screen_x, screen_y)
+            
+            vertex_colors.append(color)
+        
+        return np.array(vertex_colors, dtype=np.uint8)
+    
+    def _create_depth_buffer(self, mesh: trimesh.Trimesh, camera_position: np.ndarray) -> np.ndarray:
+        """Create depth buffer for all vertices from camera perspective"""
+        vertices = mesh.vertices
+        depths = np.zeros(len(vertices))
+        
+        for i, vertex in enumerate(vertices):
+            # Calculate distance from camera to vertex
+            depth = np.linalg.norm(vertex - camera_position)
+            depths[i] = depth
+        
+        return depths
+    
+    def _is_vertex_occluded(self, vertex_idx: int, depth: float, all_depths: np.ndarray) -> bool:
+        """Check if vertex is occluded by other vertices closer to camera"""
+        # Simple occlusion check - if many vertices are much closer, this one might be hidden
+        closer_vertices = np.sum(all_depths < depth * 0.9)  # Vertices at least 10% closer
+        
+        # If more than 20% of vertices are significantly closer, consider this vertex occluded
+        total_vertices = len(all_depths)
+        occlusion_threshold = total_vertices * 0.2
+        
+        return closer_vertices > occlusion_threshold
+    
+    def _estimate_camera_parameters(self, mesh: trimesh.Trimesh) -> dict:
+        """Estimate optimal camera parameters based on mesh geometry"""
+        vertices = mesh.vertices
+        
+        # Calculate mesh bounding box and dimensions
+        bbox_min = vertices.min(axis=0)
+        bbox_max = vertices.max(axis=0)
+        bbox_center = (bbox_min + bbox_max) / 2
+        bbox_size = bbox_max - bbox_min
+        
+        # Estimate camera distance (2.5x the maximum dimension for good framing)
+        max_dimension = np.max(bbox_size)
+        camera_distance = max_dimension * 2.5
+        
+        # Position camera along Z-axis (assuming object is centered at origin)
+        camera_position = bbox_center + np.array([0, 0, camera_distance])
+        
+        # Calculate field of view based on object size and distance
+        fov = 2 * np.arctan(max_dimension / (2 * camera_distance))
+        
+        # Calculate aspect ratio from mesh dimensions
+        aspect_ratio = bbox_size[0] / max(bbox_size[1], 0.1)
+        
+        return {
+            'position': camera_position,
+            'fov': fov,
+            'distance': camera_distance,
+            'aspect_ratio': aspect_ratio,
+            'bbox_center': bbox_center,
+            'bbox_size': bbox_size
+        }
+    
+    def _create_perspective_projection_matrix(self, fov: float, width: int, height: int) -> np.ndarray:
+        """Create 4x4 perspective projection matrix"""
+        aspect_ratio = width / height
+        near = 0.1
+        far = 1000.0
+        
+        f = 1.0 / np.tan(fov / 2)
+        
+        projection_matrix = np.array([
+            [f / aspect_ratio, 0, 0, 0],
+            [0, f, 0, 0],
+            [0, 0, (far + near) / (near - far), (2 * far * near) / (near - far)],
+            [0, 0, -1, 0]
+        ])
+        
+        return projection_matrix
+    
+    def _project_vertex_to_screen(self, vertex: np.ndarray, camera_pos: np.ndarray, 
+                                 projection_matrix: np.ndarray, screen_width: int, screen_height: int) -> tuple:
+        """Project 3D vertex to 2D screen coordinates using proper perspective projection"""
+        
+        # Transform vertex to camera space
+        vertex_camera = vertex - camera_pos
+        
+        # Check if vertex is behind camera
+        if vertex_camera[2] >= 0:
+            return None
+        
+        # Convert to homogeneous coordinates
+        vertex_homo = np.append(vertex_camera, 1)
+        
+        # Apply projection matrix
+        projected = projection_matrix @ vertex_homo
+        
+        # Perspective division
+        if projected[3] <= 0:
+            return None
+            
+        x_ndc = projected[0] / projected[3]
+        y_ndc = projected[1] / projected[3]
+        depth = projected[2] / projected[3]
+        
+        # Convert from normalized device coordinates to screen coordinates
+        screen_x = (x_ndc + 1) * screen_width / 2
+        screen_y = (1 - y_ndc) * screen_height / 2  # Flip Y for screen coordinates
+        
+        return (screen_x, screen_y, depth)
+    
+    def _sample_color_with_interpolation(self, texture_array: np.ndarray, x: float, y: float) -> np.ndarray:
+        """Sample color from texture with bilinear interpolation and edge preservation"""
+        texture_height, texture_width = texture_array.shape[:2]
+        
+        # Bounds checking with edge preservation
+        if x < 0 or x >= texture_width or y < 0 or y >= texture_height:
+            # Use edge-aware clamping for better boundary handling
+            return self._sample_edge_color(texture_array, x, y, texture_width, texture_height)
+        
+        # Detect if we're near an edge in the original image
+        if self._is_near_edge(texture_array, x, y):
+            # Use sharper sampling near edges to preserve boundaries
+            return self._sample_edge_preserving_color(texture_array, x, y)
+        
+        # Standard bilinear interpolation for smooth areas
+        return self._sample_bilinear_color(texture_array, x, y)
+    
+    def _sample_bilinear_color(self, texture_array: np.ndarray, x: float, y: float) -> np.ndarray:
+        """Standard bilinear interpolation for smooth color sampling"""
+        texture_height, texture_width = texture_array.shape[:2]
+        
+        # Bilinear interpolation
+        x0, y0 = int(np.floor(x)), int(np.floor(y))
+        x1, y1 = min(x0 + 1, texture_width - 1), min(y0 + 1, texture_height - 1)
+        
+        # Calculate interpolation weights
+        wx, wy = x - x0, y - y0
+        
+        # Sample four neighboring pixels
+        c00 = texture_array[y0, x0]
+        c10 = texture_array[y0, x1]
+        c01 = texture_array[y1, x0]
+        c11 = texture_array[y1, x1]
+        
+        # Bilinear interpolation
+        c0 = c00 * (1 - wx) + c10 * wx
+        c1 = c01 * (1 - wx) + c11 * wx
+        color = c0 * (1 - wy) + c1 * wy
+        
+        return color.astype(np.uint8)
+    
+    def _is_near_edge(self, texture_array: np.ndarray, x: float, y: float, threshold: float = 10.0) -> bool:
+        """Detect if sampling position is near a color edge"""
+        texture_height, texture_width = texture_array.shape[:2]
+        
+        # Sample surrounding pixels to detect color variation
+        x_int, y_int = int(x), int(y)
+        radius = 2
+        
+        # Ensure we don't go out of bounds
+        x_start = max(0, x_int - radius)
+        x_end = min(texture_width - 1, x_int + radius)
+        y_start = max(0, y_int - radius)
+        y_end = min(texture_height - 1, y_int + radius)
+        
+        # Calculate color variance in the neighborhood
+        neighborhood = texture_array[y_start:y_end+1, x_start:x_end+1]
+        color_variance = np.var(neighborhood, axis=(0, 1))
+        
+        # High variance indicates we're near an edge
+        return np.mean(color_variance) > threshold
+    
+    def _sample_edge_preserving_color(self, texture_array: np.ndarray, x: float, y: float) -> np.ndarray:
+        """Sample color with edge preservation - uses nearest neighbor near edges"""
+        texture_height, texture_width = texture_array.shape[:2]
+        
+        # Use nearest neighbor sampling near edges to preserve sharp boundaries
+        x_nearest = int(np.round(x))
+        y_nearest = int(np.round(y))
+        
+        # Clamp to bounds
+        x_nearest = np.clip(x_nearest, 0, texture_width - 1)
+        y_nearest = np.clip(y_nearest, 0, texture_height - 1)
+        
+        return texture_array[y_nearest, x_nearest]
+    
+    def _sample_edge_color(self, texture_array: np.ndarray, x: float, y: float, width: int, height: int) -> np.ndarray:
+        """Sample color at image edges with proper clamping"""
+        # Clamp coordinates to valid range
+        x_clamped = np.clip(x, 0, width - 1)
+        y_clamped = np.clip(y, 0, height - 1)
+        
+        return texture_array[int(y_clamped), int(x_clamped)]
         """Generate optimal UV coordinates using multiple projection methods"""
         vertices = mesh.vertices
         
@@ -491,9 +713,8 @@ class AITextureTransfer:
             
             # Try to generate UV coordinates using trimesh's unwrapping
             try:
-                # Use trimesh's unwrapping functionality
-                uv_visual = mesh_copy.uv_visual
-                if uv_visual is not None and hasattr(uv_visual, 'uv'):
+                # Check if mesh has existing UV coordinates
+                if hasattr(mesh_copy.visual, 'uv') and mesh_copy.visual.uv is not None:
                     # UV coordinates already exist
                     print("Found existing UV coordinates")
                     return self._apply_proper_texture(mesh_copy, texture_image, texture_size)
