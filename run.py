@@ -77,6 +77,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Use direct color preservation mode (bypasses AI for exact color matching)"
     )
+    parser.add_argument(
+        "--export-formats",
+        nargs="+",
+        default=["glb"],
+        choices=["glb", "obj"],
+        help="Export formats: glb (embedded textures), obj (with MTL file)"
+    )
+    parser.add_argument(
+        "--generate-mtl",
+        action="store_true",
+        help="Generate MTL material file with OBJ export"
+    )
     default_prompt="High-fidelity texture with exact color mapping, seamless UV, clean albedo, photorealistic 8k quality"
     parser.add_argument(
         "--texture-prompt",
@@ -157,8 +169,29 @@ if __name__ == "__main__":
             )
 
         if len(image) == 1:
-            out_mesh_path = os.path.join(output_dir, str(i), "mesh.glb")
-            mesh.export(out_mesh_path, include_normals=True)
+            # Determine export formats
+            export_formats = args.export_formats.copy()
+            if args.generate_mtl and "obj" not in export_formats:
+                export_formats.append("obj")
+            
+            # Base output path without extension
+            base_mesh_path = os.path.join(output_dir, str(i), "mesh")
+            
+            # Export mesh with comprehensive material support
+            exported_files = model.export_mesh_with_materials(
+                mesh=mesh,
+                output_path=base_mesh_path,
+                export_formats=export_formats,
+                texture_name="texture.png",
+                material_name="sf3d_material"
+            )
+            
+            # Validate exported files
+            from mesh_export_utils import validate_exported_files
+            validate_exported_files(exported_files)
+            
+            # Keep backward compatibility
+            out_mesh_path = exported_files.get("glb", exported_files.get("obj", list(exported_files.values())[0]))
             
             # Apply AI texture transfer if enabled
             if args.enable_texture_transfer:

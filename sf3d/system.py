@@ -1,19 +1,27 @@
+import math
 import os
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Any, List, Literal, Optional, Tuple, Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Literal, Union
 
+import gpytoolbox
 import numpy as np
+import pynanoinstantmeshes
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import trimesh
 from einops import rearrange
+from jaxtyping import Float, Integer
+from torch import Tensor
+from tqdm import tqdm
+
+from mesh_export_utils import export_mesh_comprehensive, validate_exported_files
 from huggingface_hub import hf_hub_download
-from jaxtyping import Float
 from omegaconf import OmegaConf
 from PIL import Image
 from safetensors.torch import load_model
-from torch import Tensor
 
 from sf3d.models.isosurface import MarchingTetrahedraHelper
 from sf3d.models.mesh import Mesh
@@ -530,3 +538,32 @@ class SF3D(BaseModule):
                     rets.append(tmesh)
 
         return rets, global_dict
+
+    def export_mesh_with_materials(
+        self,
+        mesh: trimesh.Trimesh,
+        output_path: str,
+        export_formats: List[str] = ["glb", "obj"],
+        texture_name: str = "texture.png",
+        material_name: str = "sf3d_material"
+    ) -> dict:
+        """
+        Export mesh with comprehensive material support (GLB + OBJ+MTL)
+        
+        Args:
+            mesh: Trimesh object with texture coordinates and materials
+            output_path: Base output path (without extension)
+            export_formats: List of formats to export ("glb", "obj")
+            texture_name: Name for texture files
+            material_name: Name for material
+        
+        Returns:
+            Dictionary with paths to exported files
+        """
+        return export_mesh_comprehensive(
+            mesh=mesh,
+            output_path=output_path,
+            export_formats=export_formats,
+            texture_name=texture_name,
+            material_name=material_name
+        )
